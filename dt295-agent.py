@@ -98,6 +98,27 @@ class Sink:
             pass
 
 
+def head_is_ready(blob: bytes) -> bool:
+    """先頭に SPS / PPS / IDR がそろっているか (H.264 のとき)。"""
+    has_sps = has_pps = has_idr = False
+    i = 0
+    while True:
+        idx = blob.find(b"\x00\x00\x01", i)
+        if idx < 0:
+            break
+        nal = idx + 3
+        if nal < len(blob):
+            nal_type = blob[nal] & 0x1F
+            if nal_type == 7:
+                has_sps = True
+            elif nal_type == 8:
+                has_pps = True
+            elif nal_type == 5:
+                has_idr = True
+        i = nal
+    return has_sps and has_pps and has_idr
+
+
 class Lease:
     """1 回の選局 (デバイスのセッション)。複数の Sink がぶら下がる。"""
 
@@ -113,6 +134,12 @@ class Lease:
         self.sinks: list[Sink] = []
         self.idle_since: float | None = time.time()
         self.bytes = 0
+        # 先頭は SPS/PPS/IDR がそろうまで送らない。選局直後や、走査中の
+        # セッションに後から乗ったときの壊れた先頭を掴ませないため。
+        self.head = bytearray()
+        self.ready = False
+        self.started = time.time()
+        self.passthrough = bool(profile and "passthrough" in profile)
         self.switching = False
 
     def users(self) -> list[dict]:
@@ -233,52 +260,29 @@ class Tuner:
     def _pump(self, lease: Lease) -> None:
         assert lease.proc.stdout is not None
         stream = lease.proc.stdout
-        cache_buf = bytearray()
-        cached = False
         while True:
             data = stream.read(65536)
             if not data:
                 break
-            if not cached:
-                cache_buf.extend(data)
-                if len(cache_buf) > 2 * 1024 * 1024:
-                    cached = True
-                    cache_buf = bytearray()
-                else:
-                    blob = bytes(cache_buf)
-                    # NAL type is in low 5 bits; nal_ref_idc varies
-                    has_sps = False
-                    has_pps = False
-                    idr_pos = -1
-                    i = 0
-                    while True:
-                        # find next start code (3 or 4 byte)
-                        idx = blob.find(b"\x00\x00\x01", i)
-                        if idx < 0:
-                            break
-                        # 4-byte start code?
-                        if idx > 0 and blob[idx-1] == 0:
-                            sc_len = 4
-                            nal_pos = idx + 3
-                        else:
-                            sc_len = 3
-                            nal_pos = idx + 3
-                        if nal_pos < len(blob):
-                            nal_type = blob[nal_pos] & 0x1F
-                            if nal_type == 7:
-                                has_sps = True
-                            elif nal_type == 8:
-                                has_pps = True
-                            elif nal_type == 5:
-                                if idr_pos < nal_pos:
-                                    idr_pos = nal_pos
-                        i = idx + 3
-                    if has_sps and has_pps and idr_pos >= 0:
-                        with self.lock:
-                            if lease.channel not in self.idr_cache:
-                                self.idr_cache[lease.channel] = bytes(cache_buf)
-                        cached = True
-                        cache_buf = bytearray()
+            if not lease.ready:
+                lease.head.extend(data)
+                limit = 0.8 if lease.passthrough else 2.5
+                if (not head_is_ready(lease.head)
+                        and len(lease.head) < 4 * 1024 * 1024
+                        and time.time() - lease.started < limit):
+                    continue
+                blob = bytes(lease.head)
+                lease.head = bytearray()
+                with self.lock:
+                    lease.ready = True
+                    lease.bytes += len(blob)
+                    if lease.channel not in self.idr_cache:
+                        self.idr_cache[lease.channel] = blob
+                    sinks = list(lease.sinks)
+                for sink in sinks:
+                    if not sink.aborted:
+                        sink.push(blob)
+                continue
             with self.lock:
                 lease.bytes += len(data)
                 sinks = list(lease.sinks)
@@ -756,14 +760,11 @@ class Handler(BaseHTTPRequestHandler):
                 continue
 
         if first is None or sink.aborted:
+            # 空の 200 を返すと denpa は ffmpeg を起動して即座に諦める。
+            # 「空き待ち」として 409 を返し、掛け直してもらう。
             self.tuner.release(sink)
             self.tuner.abandon_if_idle()
-            self.send_response(200)
-            self.send_header("Content-Type", "video/mp2t")
-            self.send_header("Content-Length", "0")
-            self.send_header("Connection", "close")
-            self.end_headers()
-            self.close_connection = True
+            self._json(409, {"message": "選局が間に合いませんでした"})
             return
 
         self.send_response(200)
