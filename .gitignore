@@ -1,0 +1,11 @@
+# build inputs
+/pix-ts-legacy
+/assets/
+
+# python
+/__pycache__/
+*.pyc
+
+# local backups and logs
+*.bak.*
+*.log
