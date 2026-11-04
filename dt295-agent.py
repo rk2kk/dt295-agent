@@ -1,23 +1,20 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""denpa のチューナーエージェント API を喋る、DT295 用の薄いエージェント。
+"""denpa のチューナー API を実装した、DT295 用のエージェント。
 
-denpa はチューナーを「エージェント」経由でしか扱わない。ここでは denpa が
-要求する最小の HTTP API (/denpa/tuners, /denpa/stream, ...) だけを実装し、
-実際の選局と TS 出力は参照実装 (pix-ts-legacy) に任せる。
+denpa はチューナーを「エージェント」経由でしか扱いません。このスクリプトは
+denpa が要求する最小限の HTTP API（/denpa/tuners、/denpa/stream など）を実装し、
+選局と TS 出力は参照実装（pix-ts-legacy）に任せます。
 
     python3 dt295-agent.py --device serial:XXXXXXXX
 
 前提:
-  - ~/pix-userland/pix-ts-legacy がビルド済み (-DDT295_CAPTURE_TESTING)
-  - デバイスはコールド (状態 0) か未認証 ready (0x10)、または既存セッション
+  - ~/pix-userland/pix-ts-legacy をビルド済み（-DDT295_CAPTURE_TESTING）
+  - デバイスがコールド（状態 0）または未認証 ready（0x10）
+  - 1 台につき同時 1 選局。同じ局は共有し、別局は優先度で決まる
 
-設計:
-  **選局はプロセスを立て直さず、1 セッションを使い回す。**
-  pix-ts-legacy を DT295_CONTROL=1 で起動し、標準入力へ
-  "channel T21" / "channel BS01_0" / "quit" を書いて切り替える。
-  こうしないと、停止のたびに ASSP が 0xffff (エラー) に落ちて
-  次の認証が通らなくなる（参照実装の既知の弱点）。
+GR はチャンネル番号（T21 など）、BS/CS は「中継器:TSID」（BS15:16625）を
+受け付けます。
 """
 
 from __future__ import annotations
