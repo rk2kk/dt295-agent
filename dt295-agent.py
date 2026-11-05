@@ -32,7 +32,7 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-AGENT_VERSION = "0.3.2-dt295"
+AGENT_VERSION = "0.3.3-dt295"
 TYPES = ["GR", "BS", "CS"]
 
 IDLE_QUIT_SECONDS = 600.0     # 誰も見ていないままこれだけ経ったら quit する
