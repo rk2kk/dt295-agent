@@ -443,6 +443,8 @@ class Tuner:
                 "types": list(TYPES),
                 "disabled": False,
                 "rank": 0,
+                # denpa v2.31 はチューナーを pin で見分ける (1 台なので個体名)
+                "pin": self.args.label,
                 "device": self.args.device,
                 "lnb": None,
                 "channel": channel,
