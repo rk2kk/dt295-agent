@@ -32,7 +32,7 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-AGENT_VERSION = "0.3.3-dt295"
+AGENT_VERSION = "0.3.4-dt295"
 TYPES = ["GR", "BS", "CS"]
 
 IDLE_QUIT_SECONDS = 600.0     # 誰も見ていないままこれだけ経ったら quit する
@@ -454,6 +454,31 @@ class Tuner:
             }
 
 
+    def card_status(self) -> dict:
+        """denpa の設定「受信」のカードリーダーに出す、機材の内蔵リーダー。
+
+        DT295 は B-CAS の差し込み口が機材に付いていて、復号は pix-ts-legacy の
+        中で行う。denpa からは 1 台のリーダーに見えるので、選局が動いている間を
+        「使用中」として答える。カードの番号は読まない (ids は空)。
+        """
+        with self.lock:
+            lease = self.lease
+            active = lease is not None and lease.proc.poll() is None
+        name = "DT295 内蔵 (%s)" % self.args.label
+        return {
+            "ok": True,
+            "message": "",
+            "source": "local",
+            "readers": [{
+                "name": name,
+                "card": True,
+                "ids": [],
+                "active": active,
+                "tuners": [name] if active else [],
+            }],
+        }
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     tuner: Tuner
@@ -604,7 +629,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/denpa/logs":
             self._json(200, {"logs": []})
         elif path == "/denpa/card":
-            self._json(200, {"ok": True, "message": "", "source": "local", "readers": []})
+            self._json(200, self.tuner.card_status())
         elif path == "/denpa/events":
             self._events()
         elif path == "/denpa/stream":
@@ -629,6 +654,16 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, self._echo(body))
         elif path == "/denpa/channels":
             self._json(200, self._channels_merge(body))
+        elif path == "/denpa/card/readers":
+            try:
+                request = json.loads(body or b"{}")
+            except ValueError:
+                request = {}
+            disabled = request.get("disabled") if isinstance(request, dict) else None
+            if isinstance(disabled, list) and disabled:
+                self._json(400, {"message": "DT295 のカードリーダーは機材に内蔵で、外せません"})
+            else:
+                self._json(200, {"ok": True})
         else:
             self._json(404, {"message": "not found"})
 
