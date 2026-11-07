@@ -32,7 +32,13 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-AGENT_VERSION = "0.3.4-dt295"
+AGENT_VERSION = "0.3.5-dt295"
+
+# このエージェントは機材のファームウェア (pix-ts-legacy) に復号を任せていて、B-CAS カードの
+# APDU (カード番号・契約確認 0x90 0x3C) を扱う口がありません。denpa v2.32 の契約確認には
+# 対応できないので、その旨を返す (denpa の画面とログに理由が出る)
+CARD_NOTE = ("このエージェント（pix-ts-legacy）は B-CAS カードの番号と"
+             "契約確認（0x90 0x3C）に対応していません")
 TYPES = ["GR", "BS", "CS"]
 
 IDLE_QUIT_SECONDS = 600.0     # 誰も見ていないままこれだけ経ったら quit する
@@ -629,7 +635,9 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/denpa/logs":
             self._json(200, {"logs": []})
         elif path == "/denpa/card":
-            self._json(200, self.tuner.card_status())
+            status = self.tuner.card_status()
+            status["message"] = CARD_NOTE
+            self._json(200, status)
         elif path == "/denpa/events":
             self._events()
         elif path == "/denpa/stream":
@@ -638,6 +646,16 @@ class Handler(BaseHTTPRequestHandler):
             self._presets_page()
         elif path == "/presets/select":
             self._preset_select(query)
+        else:
+            self._json(404, {"message": "not found"})
+
+    def do_POST(self) -> None:  # noqa: N802
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length else b""
+        path = urllib.parse.urlparse(self.path).path
+        if path == "/denpa/card/confirm":
+            # denpa v2.32 の契約確認。カードへ APDU を送れないので、対応していないことを返す
+            self._json(501, {"ok": False, "code": 0, "error": CARD_NOTE})
         else:
             self._json(404, {"message": "not found"})
 
