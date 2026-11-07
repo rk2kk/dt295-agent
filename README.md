@@ -96,6 +96,10 @@ services:
   ないためです。denpa v2.32 の契約確認は「対応していません」という理由を返します
   (`/denpa/card` の `message`、`POST /denpa/card/confirm` は 501)。
 
+- `/denpa/tuners` の `signal` に**受信品質（C/N、dB）**を返します。`pix-ts-legacy` が
+  5 秒ごとに stderr へ出す通知から拾い、使用中のチューナーだけ返します。換算式は Linux の
+  `tc90522.c` と同じで、[smpn2/pix-dt295](https://github.com/smpn2/pix-dt295)（MIT）の
+  `signal.rs` を参照しました。
 - 配信は、先頭の SPS/PPS/IDR がそろうまで保持してから始めます（最大 2.5 秒、
   passthrough は 0.8 秒）。途中から接続した視聴者にも同じ先頭を渡すので、
   壊れた先頭を掴ませません。

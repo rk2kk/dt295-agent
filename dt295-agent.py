@@ -32,7 +32,7 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-AGENT_VERSION = "0.3.5-dt295"
+AGENT_VERSION = "0.3.6-dt295"
 
 # このエージェントは機材のファームウェア (pix-ts-legacy) に復号を任せていて、B-CAS カードの
 # APDU (カード番号・契約確認 0x90 0x3C) を扱う口がありません。denpa v2.32 の契約確認には
@@ -161,6 +161,8 @@ class Tuner:
         self.thread: threading.Thread | None = None
         threading.Thread(target=self._housekeeping, daemon=True).start()
         self.idr_cache: dict[str, bytes] = {}
+        # pix-ts-legacy の stderr から拾った最後の C/N (denpa の /denpa/tuners の signal)
+        self.signal: dict | None = None
 
     # --- 状態復旧 ---------------------------------------------------------
 
@@ -256,11 +258,12 @@ class Tuner:
             stdout=subprocess.PIPE,
             env=env,
             start_new_session=True,
-            stderr=open(self.args.agent_log, "ab", buffering=0)
-            if self.args.agent_log else subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             cwd=self.args.workdir,
             bufsize=0,
         )
+        self.signal = None
+        threading.Thread(target=self._read_stderr, args=(proc,), daemon=True).start()
         return proc, profile_path
 
     def _pump(self, lease: Lease) -> None:
@@ -304,6 +307,52 @@ class Tuner:
                     sink.close()
                 lease.sinks = []
                 self.lease = None
+                self.signal = None
+
+    def _read_stderr(self, proc: subprocess.Popen) -> None:
+        """pix-ts-legacy の stderr をログに写し、C/N の通知を拾う。
+
+        pix-ts-legacy は 5 秒ごとに {"event":"signal","locked":..,"cn_mdb":..}
+        を stderr へ出す。denpa の /denpa/tuners の signal に載せるため、
+        最後の値を覚えておく。ログの形式はこれまでどおり (生の行を追記)。
+        """
+        handle = None
+        if self.args.agent_log:
+            try:
+                handle = open(self.args.agent_log, "ab", buffering=0)
+            except OSError as exc:  # noqa: BLE001
+                log("agent log open failed: %s" % exc)
+        try:
+            assert proc.stderr is not None
+            for raw in iter(proc.stderr.readline, b""):
+                if handle is not None:
+                    try:
+                        handle.write(raw)
+                    except OSError:
+                        pass
+                text = raw.decode("utf-8", "replace").strip()
+                if "cn_mdb" not in text:
+                    continue
+                try:
+                    event = json.loads(text)
+                except ValueError:
+                    continue
+                if not isinstance(event, dict) or "cn_mdb" not in event:
+                    continue
+                try:
+                    mdb = int(event.get("cn_mdb") or 0)
+                except (TypeError, ValueError):
+                    continue
+                with self.lock:
+                    self.signal = {
+                        "locked": bool(event.get("locked")),
+                        "cn_mdb": mdb,
+                        "system": event.get("system"),
+                        "at": time.time(),
+                    }
+        finally:
+            if handle is not None:
+                handle.close()
 
     def _stop_locked(self, lease: Lease) -> None:
         if lease.proc.poll() is None and lease.proc.stdin is not None:
@@ -443,6 +492,16 @@ class Tuner:
             if lease is not None and lease.proc.poll() is None:
                 channel = {"type": lease.kind, "channel": lease.channel}
                 users = lease.users()
+            signal = None
+            if channel is not None and self.signal is not None:
+                age = time.time() - float(self.signal.get("at") or 0.0)
+                if age <= 15.0:
+                    signal = {
+                        "locked": bool(self.signal.get("locked")),
+                        "cn": round(float(self.signal.get("cn_mdb") or 0) / 1000.0, 1),
+                        "unit": "dB",
+                        "atTune": False,
+                    }
             return {
                 "index": 0,
                 "name": "DT295 (%s)" % self.args.label,
@@ -454,6 +513,7 @@ class Tuner:
                 "device": self.args.device,
                 "lnb": None,
                 "channel": channel,
+                "signal": signal,
                 "users": users,
                 "pid": None,
                 "error": None,
