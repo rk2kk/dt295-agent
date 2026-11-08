@@ -163,6 +163,8 @@ class Tuner:
         self.idr_cache: dict[str, bytes] = {}
         # pix-ts-legacy の stderr から拾った最後の C/N (denpa の /denpa/tuners の signal)
         self.signal: dict | None = None
+        # 実際にオンボード変換が乗っているか (None=未確認 / True / False)
+        self.transcode_active: bool | None = None
 
     # --- 状態復旧 ---------------------------------------------------------
 
@@ -263,6 +265,7 @@ class Tuner:
             bufsize=0,
         )
         self.signal = None
+        self.transcode_active = None
         threading.Thread(target=self._read_stderr, args=(proc,), daemon=True).start()
         return proc, profile_path
 
@@ -331,6 +334,15 @@ class Tuner:
                     except OSError:
                         pass
                 text = raw.decode("utf-8", "replace").strip()
+                if '"event":"transcode"' in text.replace(" ", ""):
+                    try:
+                        event = json.loads(text)
+                    except ValueError:
+                        continue
+                    if isinstance(event, dict) and "active" in event:
+                        with self.lock:
+                            self.transcode_active = bool(event.get("active"))
+                    continue
                 if "cn_mdb" not in text:
                     continue
                 try:
@@ -591,6 +603,10 @@ class Handler(BaseHTTPRequestHandler):
         tuner = getattr(self, "tuner", None)
         lease = getattr(tuner, "lease", None) if tuner is not None else None
         if lease is not None and lease.proc.poll() is None and lease.profile:
+            # 変換が乗らなかったセッションは、受け側 (denpa) が再エンコードへ
+            # 回れるよう passthrough として答える。
+            if getattr(tuner, "transcode_active", None) is False:
+                return "passthrough"
             return self._profile_name(lease.profile)
         return self._profile_name(self.PRESET_CURRENT)
 
