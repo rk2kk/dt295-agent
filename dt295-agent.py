@@ -32,7 +32,7 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-AGENT_VERSION = "0.3.6-dt295"
+AGENT_VERSION = "0.3.7-dt295"
 
 # このエージェントは機材のファームウェア (pix-ts-legacy) に復号を任せていて、B-CAS カードの
 # APDU (カード番号・契約確認 0x90 0x3C) を扱う口がありません。denpa v2.32 の契約確認には
@@ -157,6 +157,7 @@ class Tuner:
         self.args = args
         self.lock = threading.Lock()
         self.lease: Lease | None = None
+        self.retune_event = threading.Event()
         self.stopping = False
         self.thread: threading.Thread | None = None
         threading.Thread(target=self._housekeeping, daemon=True).start()
@@ -266,6 +267,7 @@ class Tuner:
         )
         self.signal = None
         self.transcode_active = None
+        self.retune_event.clear()
         threading.Thread(target=self._read_stderr, args=(proc,), daemon=True).start()
         return proc, profile_path
 
@@ -334,6 +336,8 @@ class Tuner:
                     except OSError:
                         pass
                 text = raw.decode("utf-8", "replace").strip()
+                if '"event":"tuned"' in text:
+                    self.retune_event.set()
                 if '"event":"transcode"' in text.replace(" ", ""):
                     try:
                         event = json.loads(text)
@@ -449,15 +453,47 @@ class Tuner:
                     old.aborted = True
                 lease.sinks = []
 
+            reused = False
             if lease is not None:
-                # チャンネルが変わったら、セッションを **きれいに畳んでから**
-                # 作り直す。セッション内で再選局すると、AES 連鎖と PSI が
-                # 前の局のぶん混ざって "invalid DT295 TS packet" や
-                # "incomplete initial PAT/PMT/CAT" になる。
-                # quit で終われば状態 0x10 に戻り、次の認証は通る。
-                self._stop_locked(lease)
-                self.lease = None
-                lease = None
+                new_passthrough = channel.upper().startswith("CS")
+                reusable = (lease.kind == kind
+                            and lease.passthrough == new_passthrough
+                            and lease.proc.poll() is None)
+                if reusable:
+                    log("fast retune: %s -> %s" % (lease.channel, channel))
+                    # 高速チューン: 既存セッションを畳まず、stdin で再選局する。
+                    # pix-ts-legacy の retune 経路 (stop -> tune -> reprepare ->
+                    # start) が約 1.7s で済む。PSI / AES は retune 側で
+                    # リセットされるので、従来の「畳んで作り直す」より速い。
+                    self.lock.release()
+                    ok = False
+                    try:
+                        self.retune_event.clear()
+                        assert lease.proc.stdin is not None
+                        lease.proc.stdin.write(("channel %s\n" % channel).encode())
+                        lease.proc.stdin.flush()
+                        ok = self.retune_event.wait(timeout=10)
+                    except (BrokenPipeError, OSError, ValueError):
+                        ok = False
+                    finally:
+                        self.lock.acquire()
+                    if ok:
+                        log("fast retune ok: %s" % channel)
+                        lease.channel = channel
+                        lease.idle_since = None
+                        lease.started = time.time()
+                        self.signal = None
+                        self.transcode_active = None
+                        self.idr_cache.pop(channel, None)
+                        reused = True
+                    else:
+                        log("fast retune FAILED for %s; restarting" % channel)
+                if not reused:
+                    # チャンネルが変わったら、セッションを **きれいに畳んでから**
+                    # 作り直す (CS や高速チューン不可のときのフォールバック)。
+                    self._stop_locked(lease)
+                    self.lease = None
+                    lease = None
 
             if lease is None:
                 proc, profile = self._spawn(channel)
