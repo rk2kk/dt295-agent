@@ -32,7 +32,7 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-AGENT_VERSION = "0.3.7-dt295"
+AGENT_VERSION = "0.3.8-dt295"
 
 # このエージェントは機材のファームウェア (pix-ts-legacy) に復号を任せていて、B-CAS カードの
 # APDU (カード番号・契約確認 0x90 0x3C) を扱う口がありません。denpa v2.32 の契約確認には
@@ -739,7 +739,7 @@ class Handler(BaseHTTPRequestHandler):
         query = urllib.parse.parse_qs(parsed.query)
 
         if path == "/denpa/tuners":
-            self._json(200, {"tuners": [self.tuner.status()]})
+            self._json(200, {"tuners": [self.tuner.status()], "detected": True})
         elif path == "/denpa/about":
             self._json(200, {"name": "denpa-agent-dt295", "version": AGENT_VERSION})
         elif path == "/denpa/channels":
