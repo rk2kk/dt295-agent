@@ -499,6 +499,7 @@ class Tuner:
                 proc, profile = self._spawn(channel)
                 lease = Lease(kind, channel, proc, profile)
                 self.lease = lease
+                self.transcode_active = None
                 self.thread = threading.Thread(target=self._pump, args=(lease,), daemon=True)
                 self.thread.start()
 
