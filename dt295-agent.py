@@ -407,8 +407,57 @@ class Tuner:
 
     # --- 利用者の付け外し -------------------------------------------------
 
+    def _ensure_retune_source(self, kind: str, channel: str) -> None:
+        """CS06 は単独チューンだと PSI 直後にデータが止まる個体である。
+        fast retune 経路が効くよう、CS06 要求の前に CS08 を開いてデータが
+        流れるまで待ち、self.lease に仕込む。open_stream の with self.lock に
+        入る前に呼ぶこと (ロック再取得でデッドロックしないため)。"""
+        if kind != "CS":
+            return
+        base, _tsid = self._split(channel)
+        # _stream の正規化で bare "CS06" は "CS06_0" になるため、base も
+        # スロット付きでも CS06 と判定する。
+        if base.upper() not in ("CS06", "CS6", "CS06_0", "CS6_0"):
+            return
+        # 既存 lease を確認。CS08 ならそのまま retune 元として使う。
+        # それ以外 (CS06 自身など) は畳んでから CS08 を開く。
+        with self.lock:
+            lease = self.lease
+            if lease is not None and lease.kind == "CS":
+                existing_base, _ = self._split(lease.channel)
+                if existing_base.upper() in ("CS08", "CS8") and lease.proc.poll() is None:
+                    return
+                self._stop_locked(lease)
+                self.lease = None
+                self.signal = None
+                self.transcode_active = None
+        log("retune-source: opening CS08 for %s" % channel)
+        try:
+            proc, profile = self._spawn("CS08_0")
+        except Exception as exc:
+            log("retune-source: spawn failed: %s" % exc)
+            return
+        warm = Lease("CS", "CS08_0", proc, profile)
+        with self.lock:
+            self.lease = warm
+            self.transcode_active = None
+        threading.Thread(target=self._pump, args=(warm,), daemon=True).start()
+        # データが流れるまで待つ。ロックは取らない (GIL 下で属性読取は安全)。
+        # ここで self.lock を取ると open_stream 側と競合するので絶対に取らない。
+        deadline = time.time() + 12.0
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                log("retune-source: CS08 ended early")
+                return
+            if warm.ready and warm.bytes > 256 * 1024:
+                log("retune-source: CS08 streaming (%d bytes)" % warm.bytes)
+                return
+            time.sleep(0.2)
+        log("retune-source: CS08 did not become ready in time")
+
     def open_stream(self, kind: str, channel: str, use: str, priority: int,
                     after: list[str]) -> tuple[Sink | None, int, str]:
+        self._ensure_retune_source(kind, channel)
         with self.lock:
             lease = self.lease
             if lease is not None:
