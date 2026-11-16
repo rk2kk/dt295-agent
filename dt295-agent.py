@@ -470,7 +470,11 @@ class Tuner:
                     try:
                         self.retune_event.clear()
                         assert lease.proc.stdin is not None
-                        lease.proc.stdin.write(("channel %s\n" % channel).encode())
+                        # pix-ts の control は "CS06_0" 形式のみ解釈でき、
+                        # denpa が送る "CS06:28768" (TSID 付き) は受け付けない。
+                        # spawn 時と同じく base に分解してから送る。
+                        base, _tsid = self._split(channel)
+                        lease.proc.stdin.write(("channel %s\n" % base).encode())
                         lease.proc.stdin.flush()
                         ok = self.retune_event.wait(timeout=10)
                     except (BrokenPipeError, OSError, ValueError):
