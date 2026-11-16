@@ -428,27 +428,8 @@ class Tuner:
             if lease is not None and lease.proc.poll() is not None:
                 self.lease = lease = None
 
-            # CS の初回起動 (lease なし) は、単独チューンだと受信が続かない
-            # 個体がある (CS06)。CS08_0 で一度ウォームアップしてから目的
-            # チャンネルへ retune する (fast retune 経路は動作する)。
-            if (lease is None and kind == "CS"
-                    and channel.upper() not in ("CS08", "CS8")):
-                try:
-                    proc, profile = self._spawn("CS08_0")
-                    lease = Lease(kind, "CS08_0", proc, profile)
-                    self.lease = lease
-                    self.transcode_active = None
-                    self.thread = threading.Thread(target=self._pump, args=(lease,), daemon=True)
-                    self.thread.start()
-                    time.sleep(3.0)
-                except Exception as exc:
-                    log("warmup spawn failed: %s" % exc)
-                    lease = None
-                    self.lease = None
-
             # CS は SPS/PPS をストリーム開始時のみ送るため、共有セッションだと
             # 後続視聴者が mid-GOP から始まり途切れる。常に新規 lease で開始する。
-            # ただし warm-up で作った lease は retune で再利用する。
             if kind == "CS" and lease is not None and lease.kind == kind and lease.channel == channel:
                 self._stop_locked(lease)
                 self.lease = None
