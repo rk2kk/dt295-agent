@@ -244,10 +244,13 @@ class Tuner:
         env = dict(os.environ)
         env["DT295_CONTROL"] = "1"
         env.setdefault("DT295_ALLOW_ECM_CONFLICT", "1")
-        # CS channels: default to the passthrough profile (H.264 transcode is
-        # still unstable on CS). DT295_CS_PROFILE overrides the choice without
-        # a rebuild, e.g. DT295_CS_PROFILE=/config/dt295-transcode.env.
-        if channel.upper().startswith("CS"):
+        # CS06 only: force passthrough (on-board H.264 transcode is unstable on
+        # this transponder). All other channels (CS04/CS08, GR, BS) use the
+        # user-selected preset via --transcode (dt295-transcode.env), so the
+        # preset chosen in denpa's UI is respected.
+        # DT295_CS_PROFILE remains as a legacy override for CS06 only.
+        base, _tsid = self._split(channel)
+        if base.upper() in ("CS06", "CS6", "CS06_0", "CS6_0"):
             profile_path = os.environ.get(
                 "DT295_CS_PROFILE",
                 os.path.join("/config/dt295-presets", "dt295-passthrough.env"))
