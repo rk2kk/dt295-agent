@@ -20,6 +20,12 @@ COPY assets/ /opt/pix/assets/
 COPY --from=build /src/dt295-recover /opt/dt295-recover
 RUN chmod +x /opt/dt295-recover
 COPY dt295-agent.py /opt/dt295-agent.py
+# MB8AC031-CFW backend
+RUN mkdir -p /opt/mb8cfw
+COPY cfw-bin/mb8cfw-rec /opt/mb8cfw/mb8cfw-rec
+COPY cfw-bin/mb8cfw-ctl /opt/mb8cfw/mb8cfw-ctl
+COPY cfw-bin/mb8cfw-card-confirm /opt/mb8cfw/mb8cfw-card-confirm
+RUN chmod +x /opt/mb8cfw/mb8cfw-rec /opt/mb8cfw/mb8cfw-ctl /opt/mb8cfw/mb8cfw-card-confirm
 
 EXPOSE 25252
 ENTRYPOINT ["python3", "/opt/dt295-agent.py"]

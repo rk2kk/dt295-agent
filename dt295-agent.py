@@ -222,7 +222,40 @@ class Tuner:
         tsid = int(tail)
         return (base, tsid) if 1 <= tsid <= 65535 else (channel, None)
 
+    @staticmethod
+    def _cfw_channel(channel: str) -> str:
+        """denpa のチャンネル名を mb8cfw-rec の形式へ変換する。
+        CS06:28768 / CS06_0 -> CS6, T21 -> 21, 21 -> 21, BS15:16625 -> BS15。"""
+        base, _tsid = Tuner._split(channel)
+        base = base.upper()
+        # 旧形式のスロット付き (CS06_0, BS15_1) は _ 以降を落とす
+        if "_" in base:
+            base = base.split("_", 1)[0]
+        if base.startswith("T") and base[1:].isdigit():
+            return base[1:]                      # T21 -> 21 (地上)
+        if base.startswith("CS"):
+            tail = base[2:]
+            if tail.isdigit():
+                return "CS%d" % int(tail)        # CS06 -> CS6 (TSID は自動解決)
+        if base.startswith("BS"):
+            if base[2:].isdigit():
+                return "BS%d" % int(base[2:])    # BS15 -> BS15
+            return base
+        if base.isdigit():
+            return base                           # 27 など
+        return base
+
     def _command(self, channel: str) -> list[str]:
+        if getattr(self.args, "cfw", False):
+            # MB8AC031-CFW バックエンド: 選局は mb8cfw-rec が行う。
+            # 長時間を指定して SIGTERM で止める (エージェントの既存ライフサイクルを維持)。
+            return [
+                self.args.cfw_binary,
+                "--dev", "dt295",
+                self._cfw_channel(channel),
+                "3600",
+                "-",
+            ]
         base, tsid = self._split(channel)
         cmd = [
             self.args.binary,
@@ -238,10 +271,31 @@ class Tuner:
         return cmd
 
     def _spawn(self, channel: str) -> tuple[subprocess.Popen, str | None]:
-        self._recover()
+        cfw = getattr(self.args, "cfw", False)
+        if not cfw:
+            self._recover()
         cmd = self._command(channel)
         log("spawn %s: %s" % (channel, " ".join(cmd)))
         env = dict(os.environ)
+        if cfw:
+            # CFW には DT295 固有の環境変数は不要 (recover も不要)
+            env.pop("DT295_CONTROL", None)
+            env.pop("DT295_ALLOW_ECM_CONFLICT", None)
+            env.pop("MB8CFW_FIRMWARE", None)
+            try:
+                proc = subprocess.Popen(
+                    cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, start_new_session=True,
+                    cwd=self.args.workdir, bufsize=0,
+                )
+                self.signal = None
+                self.transcode_active = None
+                self.retune_event.clear()
+                threading.Thread(target=self._read_stderr, args=(proc,), daemon=True).start()
+                return proc, None
+            except OSError as exc:
+                log("cfw spawn failed: %s" % exc)
+                raise
         env["DT295_CONTROL"] = "1"
         env.setdefault("DT295_ALLOW_ECM_CONFLICT", "1")
         # CS06 only: force passthrough (on-board H.264 transcode is unstable on
@@ -461,7 +515,10 @@ class Tuner:
                 new_passthrough = channel.upper().startswith("CS")
                 reusable = (lease.kind == kind
                             and lease.passthrough == new_passthrough
-                            and lease.proc.poll() is None)
+                            and lease.proc.poll() is None
+                            and not getattr(self.args, "cfw", False))
+                # CFW では stdin の再選局コマンドが使えないため、
+                # 常に畳んで作り直す (mb8cfw-rec を再 spawn)
                 if reusable:
                     log("fast retune: %s -> %s" % (lease.channel, channel))
                     # 高速チューン: 既存セッションを畳まず、stdin で再選局する。
@@ -587,6 +644,17 @@ class Tuner:
             lease = self.lease
             active = lease is not None and lease.proc.poll() is None
         name = "DT295 内蔵 (%s)" % self.args.label
+        ids: list[str] = []
+        if getattr(self.args, "cfw", False):
+            # CFW モードでは B-CAS カード番号を読んで denpa に渡す (ログには出さない)
+            try:
+                out = subprocess.run(
+                    [self.args.cfw_card_confirm, "id"],
+                    capture_output=True, text=True, timeout=8)
+                if out.returncode == 0 and out.stdout.strip().isdigit():
+                    ids = [out.stdout.strip()]
+            except Exception:  # noqa: BLE001
+                pass
         return {
             "ok": True,
             "message": "",
@@ -594,7 +662,7 @@ class Tuner:
             "readers": [{
                 "name": name,
                 "card": True,
-                "ids": [],
+                "ids": ids,
                 "active": active,
                 "tuners": [name] if active else [],
             }],
@@ -756,7 +824,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"logs": []})
         elif path == "/denpa/card":
             status = self.tuner.card_status()
-            status["message"] = CARD_NOTE
+            # CFW モードでは B-CAS カードが使えるので、未対応の注記を付けない
+            if not getattr(self.tuner.args, "cfw", False):
+                status["message"] = CARD_NOTE
             self._json(200, status)
         elif path == "/denpa/events":
             self._events()
@@ -774,8 +844,24 @@ class Handler(BaseHTTPRequestHandler):
         body = self.rfile.read(length) if length else b""
         path = urllib.parse.urlparse(self.path).path
         if path == "/denpa/card/confirm":
-            # denpa v2.32 の契約確認。カードへ APDU を送れないので、対応していないことを返す
-            self._json(501, {"ok": False, "code": 0, "error": CARD_NOTE})
+            # denpa v2.32 の契約確認。CFW モードでは B-CAS へ 0x90 0x3C を送る。
+            if getattr(self.tuner.args, "cfw", False):
+                try:
+                    body = json.loads(length and body or b"{}")
+                    verification = body.get("verification", "")
+                    date = int(body.get("date", 0))
+                    out = subprocess.run(
+                        [self.tuner.args.cfw_card_confirm, verification, str(date)],
+                        capture_output=True, text=True, timeout=8)
+                    if out.returncode == 0 and out.stdout.strip().isdigit():
+                        self._json(200, {"ok": True, "code": int(out.stdout.strip())})
+                    else:
+                        self._json(200, {"ok": False, "code": 0,
+                                         "error": (out.stderr or "card confirm failed").strip()[:200]})
+                except Exception as exc:  # noqa: BLE001
+                    self._json(200, {"ok": False, "code": 0, "error": str(exc)[:200]})
+            else:
+                self._json(501, {"ok": False, "code": 0, "error": CARD_NOTE})
         else:
             self._json(404, {"message": "not found"})
 
@@ -990,6 +1076,10 @@ def main() -> int:
     ap.add_argument("--transcode", default=None,
                     help="KEY=VALUE file merged into the child environment")
     ap.add_argument("--recover", default="/opt/dt295-recover")
+    ap.add_argument("--cfw", action="store_true",
+                    help="use MB8AC031-CFW backend (mb8cfw-rec) instead of pix-ts-legacy")
+    ap.add_argument("--cfw-binary", default="/opt/mb8cfw/mb8cfw-rec")
+    ap.add_argument("--cfw-card-confirm", default="/opt/mb8cfw/mb8cfw-card-confirm")
     args = ap.parse_args()
     if not args.device:
         ap.error("--device is required (e.g. serial:XXXXXXXX)")
